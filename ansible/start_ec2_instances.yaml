@@ -1,0 +1,109 @@
+
+- name: work with ec2
+  hosts: localhost
+  vars:
+    region: eu-west-1
+
+  tasks:
+    - name: get instances with tag Name Dynatrace_Managed  
+      ec2_instance_info:
+        region: "{{ region }}"
+        filters:  
+           "tag:Name": Dynatrace_Managed
+      register: ec2_instances
+
+    - name: initialize instances list
+      set_fact: 
+         ids: []  
+
+    - name: list all ec2 instnces matched
+      set_fact:
+        ids: "{{ ids + [ item['instance_id'] ] }}"
+      loop: "{{ ec2_instances['instances'] }}" 
+ 
+    - name: list id's of found instances
+      debug:
+        msg: "instances found: {{ ids }}"
+
+    - name: start instances
+      amazon.aws.ec2_instance:
+        region: "{{ region }}"
+        state: running
+        instance_ids: 
+           - "{{ item }}"
+#          - i-07f0da19d53387533
+      loop: "{{ ids }}"
+
+    - name: retrieve publich IP address for startet instances
+      ec2_instance_info:
+        region: "{{ region }}"
+        filters:
+#            instance-state-name: "running"
+           "tag:Name": Dynatrace_Managed 
+      register: ec2_running_instances
+
+    - name: print output
+      debug:
+        msg: "instances found: {{ lookup('ansible.utils.to_paths', ec2_running_instances) }}"
+
+    - name: initialize instances PublicDns list
+      set_fact:
+         publicIps: []
+
+    - name: list all ec2 publicDns for instnces matched
+      set_fact:
+        publicIps: "{{ publicIps + [ item['public_ip_address'] ] }}"
+      loop: "{{ ec2_running_instances['instances'] }}"
+    
+    - name: list publicIps of found instances
+      debug:
+        msg: "instances found: {{ publicIps }}"
+
+    - name: start Dynatrace Managed
+      delegate_to: "{{ item }}"
+      remote_user: ubuntu
+      ansible.builtin.command:
+        cmd: sudo /opt/dynatrace-managed/launcher/dynatrace.sh start
+      loop: "{{ publicIps }}"
+
+    - name: start OneAgent
+      delegate_to: "{{ item }}"
+      remote_user: ubuntu
+      ansible.builtin.service:
+        name: oneagent
+        state: started
+      loop: "{{ publicIps }}"
+
+    - name: start OneAgent on other nodes
+      delegate_to: "{{ item }}"
+      ansible.builtin.service:
+        name: oneagent
+        state: started
+      with_items: "{{ groups['dynatrace'] }}"
+
+    - name: initiate set server line
+      set_fact:
+        set_server_string: ""   
+ 
+    - name: compose set-server list
+      set_fact:
+        set_server_string: "{{ set_server_string }};https://{{ item }}:443;https://ec2-{{ item }}.eu-west-1.compute.amazonaws.com:443"
+      loop: "{{ publicIps }}"
+
+    - name: set-servrer string
+      set_fact:
+        set_server_string: "{{ set_server_string|regex_replace('^;','') }}" 
+
+    - name: reassign new endpoints for OneAgent
+      delegate_to: "{{ item }}"
+      remote_user: root
+      ansible.builtin.shell: sudo /opt/dynatrace/oneagent/agent/tools/oneagentctl --set-server=$DT_SERVERS --restart-service
+      environment: 
+        DT_SERVERS: "{{ set_server_string }}"
+      with_items: "{{ groups['dynatrace'] }}"
+      register: myoutput
+
+    - name: results of ser-server
+      debug:
+        msg: "set-server results: {{ myoutput }}"
+      with_items: "{{ groups['dynatrace'] }}"
